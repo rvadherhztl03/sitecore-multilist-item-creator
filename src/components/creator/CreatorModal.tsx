@@ -29,7 +29,7 @@ type Step =
   | { name: 'end'; tone: 'success' | 'warning'; text: string; detail?: string };
 
 const LOADING: Step = { name: 'loading' };
-const messageOf = (e: unknown) => (e instanceof Error && e.message) || copy.UNKNOWN_ERROR;
+const { messageOf } = copy;
 
 /** Works out where the new item goes for the chosen item; the next step is the form, or the error. */
 async function resolve(client: CreatorClient, page: PageContext, config: CreatorConfig, c: Candidate): Promise<Step> {

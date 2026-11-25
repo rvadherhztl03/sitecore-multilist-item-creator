@@ -5,6 +5,8 @@ export const OPEN_SETUP = 'Open setup';
 export const NOT_FOUND = "Couldn't find this field's item on the page. Components from partial designs aren't supported yet.";
 export const PICK = 'This field is on more than one component here. Which one?';
 export const UNKNOWN_ERROR = 'Something went wrong.';
+/** The message to show for anything a call threw (an SdkError says what happened in plain English). */
+export const messageOf = (e: unknown) => (e instanceof Error && e.message) || UNKNOWN_ERROR;
 
 export const partialFailure = (path: string, targetField: string) => `Created ${path}, but couldn't add it to ${targetField}. Select it there yourself.`;
 export const added = (name: string, targetField: string) => `Added ${name} to ${targetField}.`;

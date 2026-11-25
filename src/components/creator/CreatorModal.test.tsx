@@ -288,7 +288,19 @@ describe('CreatorModal: Setup', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Open setup' }));
 
     expect(screen.queryByText("This field isn't set up yet.")).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Multilist field to add to')).toHaveValue('');
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     expect(await screen.findByText("This field isn't set up yet.")).toBeInTheDocument();
+  });
+
+  it('opens Setup prefilled with the parsed config when the target cannot be resolved', async () => {
+    const raw = config({ required: ['Title'] });
+    const fake = creatorFake({ raw, items: [holder(HERO, 'Hero', raw)], ops: { ReadFolder: () => ({ data: { data: { item: null } } }) } });
+    render(<CreatorModal client={fake.client} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open setup' }));
+
+    expect(screen.getByLabelText('Multilist field to add to')).toHaveValue('Related Items');
+    expect(screen.getByLabelText('Required fields, one per line (optional)')).toHaveValue('Title');
+    expect(fake.client.setValue).not.toHaveBeenCalled();
   });
 });
