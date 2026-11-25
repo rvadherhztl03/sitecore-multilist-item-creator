@@ -36,10 +36,51 @@ describe('parseConfig', () => {
     expect(res.ok ? '' : res.message).toContain('templates');
   });
 
-  it('reports a setting of the wrong shape as invalid', () => {
-    for (const body of ['"templates":"a"', '"required":"Title"', '"required":[1]', '"nameFrom":3', '"folder":5']) {
-      expect(parseConfig(`{"targetField":"X",${body}}`)).toMatchObject({ ok: false });
+  it.each([
+    ['"templates":"a"', 'invalid-json'],
+    ['"templates":{}', 'invalid-json'],
+    ['"required":"Title"', 'invalid-json'],
+    ['"required":[1]', 'invalid-json'],
+    ['"nameFrom":3', 'invalid-json'],
+    ['"folder":5', 'bad-guid'],
+    ['"folder":["x"]', 'bad-guid'],
+    ['"templates":[5]', 'bad-guid'],
+    ['"templates":[null]', 'bad-guid'],
+  ])('reports %s as %s', (body, reason) => {
+    expect(parseConfig(`{"targetField":"X",${body}}`)).toMatchObject({ ok: false, reason });
+  });
+
+  it('never throws, whatever the runtime input', () => {
+    for (const raw of [5, true, {}, [], () => 1]) {
+      expect(parseConfig(raw as unknown as string)).toMatchObject({ ok: false, reason: 'empty' });
     }
+  });
+
+  it('trims the target field, nameFrom and required entries', () => {
+    expect(parseConfig('{"targetField":"  Related Items ","nameFrom":" Title ","required":[" Title ","Summary  "]}')).toStrictEqual({
+      ok: true,
+      config: { targetField: 'Related Items', nameFrom: 'Title', required: ['Title', 'Summary'] },
+    });
+  });
+
+  it('drops blank required entries, and the list when none are left', () => {
+    expect(parseConfig('{"targetField":"X","required":["Title","",  "  "]}')).toStrictEqual({ ok: true, config: { targetField: 'X', required: ['Title'] } });
+    expect(parseConfig('{"targetField":"X","required":["", " "]}')).toStrictEqual({ ok: true, config: { targetField: 'X' } });
+  });
+
+  it('removes duplicate templates after normalizing, keeping first-seen order', () => {
+    const other = '2c0685bf-fbf9-447b-8fc9-6758ecae42cd';
+    const raw = JSON.stringify({ targetField: 'X', templates: [other, RAW, RAW.toUpperCase(), `{${RAW}}`, RAW.replaceAll('-', ''), other] });
+    expect(parseConfig(raw)).toStrictEqual({ ok: true, config: { targetField: 'X', templates: ['{2C0685BF-FBF9-447B-8FC9-6758ECAE42CD}', NORM] } });
+  });
+
+  it('removes duplicate required fields after trimming', () => {
+    expect(parseConfig('{"targetField":"X","required":["a"," a ","b","a"]}')).toStrictEqual({ ok: true, config: { targetField: 'X', required: ['a', 'b'] } });
+  });
+
+  it('counts a whitespace-only setting as blank', () => {
+    const res = parseConfig('{"targetField":"X","folder":"  ","nameFrom":"  ","templates":" ","required":"  "}');
+    expect(res).toStrictEqual({ ok: true, config: { targetField: 'X' } });
   });
 
   it('accepts only a target field', () => {
@@ -98,6 +139,12 @@ describe('normalizeId', () => {
 
   it('ignores surrounding whitespace', () => {
     expect(normalizeId(` ${RAW}\n`)).toBe(NORM);
+  });
+
+  it('throws SdkError, not TypeError, for a non-string', () => {
+    for (const id of [5, null, undefined, {}, []]) {
+      expect(() => normalizeId(id as unknown as string)).toThrow(SdkError);
+    }
   });
 
   it.each([
