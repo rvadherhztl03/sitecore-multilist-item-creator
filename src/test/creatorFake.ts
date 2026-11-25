@@ -56,7 +56,8 @@ export function creatorFake({ raw = '', items = [], existing = '', ops = {}, rel
     TemplateNames: (vars) =>
       ok(Object.fromEntries(Object.entries(vars).filter(([k]) => /^t\d+$/.test(k)).map(([k, id]) => [k, { name: NAMES[id as string] }]))),
     CreateItem: (vars) => ok({ createItem: { item: { itemId: compact(NEW_ITEM), name: vars.name, path: `${FOLDER_PATH}/${vars.name}` } } }),
-    ReadField: () => ok({ item: { fields: { nodes: [{ name: 'Related Items', value: existing }] } } }),
+    // version 3 differs from the page item's 1, so a write at the version the read returned is told apart.
+    ReadField: () => ok({ item: { version: 3, fields: { nodes: [{ name: 'Related Items', value: existing }] } } }),
     UpdateField: (vars) => ok({ updateItem: { item: { itemId: vars.itemId, name: 'x', path: '/x', version: 1 } } }),
   };
 
@@ -82,7 +83,9 @@ export function creatorFake({ raw = '', items = [], existing = '', ops = {}, rel
   const names = () => calls.map((c) => (c.key === 'xmc.authoring.graphql' ? opOf(c.params.body.query) : c.key));
   /** The variables of each call to an Authoring operation. */
   const varsOf = (op: string) => calls.filter((c) => c.key === 'xmc.authoring.graphql' && opOf(c.params.body.query) === op).map((c) => c.params.body.variables);
-  return { client: full, calls, names, varsOf };
+  /** The query text of each call to an Authoring operation. */
+  const queryOf = (op: string) => calls.filter((c) => c.key === 'xmc.authoring.graphql' && opOf(c.params.body.query) === op).map((c) => c.params.body.query as string);
+  return { client: full, calls, names, varsOf, queryOf };
 }
 
 /** A GraphQL error reply. */

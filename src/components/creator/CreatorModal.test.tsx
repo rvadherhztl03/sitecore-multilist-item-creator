@@ -159,7 +159,11 @@ describe('CreatorModal: the form', () => {
     typeName('Fresh');
     create();
     await screen.findByText('Added Fresh to Related Items.');
-    expect(fake.varsOf('CreateItem')[0].fields).toEqual([{ name: 'Title', value: 'Big news' }]);
+    // The fields are literals in the document, not a variable; the blank Summary is left out.
+    const [query] = fake.queryOf('CreateItem');
+    expect(query).toContain('fields: [{ name: "Title", value: "Big news" }]');
+    expect(query).not.toContain('Summary');
+    expect(fake.varsOf('CreateItem')[0]).not.toHaveProperty('fields');
   });
 
   it('prefills the name from the nameFrom field until the name is edited', async () => {
@@ -188,9 +192,10 @@ describe('CreatorModal: creating', () => {
     const after = fake.names().slice(fake.names().indexOf('CreateItem'));
     expect(after).toEqual(['CreateItem', 'ReadField', 'UpdateField', 'pages.reloadCanvas']);
     expect(fake.varsOf('CreateItem')).toEqual([
-      { name: 'Fresh', templateId: braced(ARTICLE), parent: braced(FOLDER), language: 'en', fields: [] },
+      { name: 'Fresh', templateId: braced(ARTICLE), parent: braced(FOLDER), language: 'en' },
     ]);
-    expect(fake.varsOf('UpdateField')[0]).toMatchObject({ itemId: braced(HERO), field: 'Related Items', value: `${braced(BLOG)}|${braced(NEW_ITEM)}` });
+    expect(fake.varsOf('ReadField')[0]).not.toHaveProperty('version'); // reads the latest, writes the version it got back
+    expect(fake.varsOf('UpdateField')[0]).toMatchObject({ itemId: braced(HERO), version: 3, field: 'Related Items', value: `${braced(BLOG)}|${braced(NEW_ITEM)}` });
     expect(screen.queryByText(/Reload the page/)).not.toBeInTheDocument();
 
     expect(fake.client.closeApp).not.toHaveBeenCalled();
