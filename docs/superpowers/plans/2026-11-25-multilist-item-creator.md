@@ -4,7 +4,7 @@
 
 **Goal:** A Marketplace app whose Page builder custom field lets an editor create a new item and append it to a sibling native Multilist field, without leaving the Page builder.
 
-**Architecture:** One Next.js app, one extension point (Page builder custom field, route `/custom-field-extension`). The companion field's own value holds a JSON config (set on Standard Values). The modal reads that config and the current item from the SDK, creates the item through `xmc.authoring.graphql`, then re-reads and appends to the target multilist. Pure logic lives in `src/lib/*` and is unit-tested against a fake SDK client; UI lives in `src/components/creator/*`.
+**Architecture:** One Next.js app, one extension point (Page builder custom field, route `/custom-field-extension`). The companion field's own value holds a JSON config (set on Standard Values). The modal reads that config and the page from the SDK, finds the field's item among the page and its layout's datasources (the SDK doesn't say which item opened it; see `docs/spike-findings.md`), creates the item through `xmc.authoring.graphql`, then re-reads and appends to the target multilist. Pure logic lives in `src/lib/*` and is unit-tested against a fake SDK client; UI lives in `src/components/creator/*`.
 
 **Tech Stack:** Next.js 15 (App Router, `src/`), React 19, TypeScript 5.9, `@sitecore-marketplace-sdk/client` + `@sitecore-marketplace-sdk/xmc`, Tailwind 4 + Blok/shadcn UI, Vitest 4 + Testing Library + jsdom. Same versions as Content Transfer.
 
@@ -29,10 +29,14 @@
 3. **Item name with characters Sitecore rejects** (`/ \ : ? " < > | [ ] *`, leading/trailing spaces, empty) → blocked in the form with a message before any API call. Test in Task 6.
 4. **Created but append failed** → modal shows the new item's path and says to select it manually; does not retry the create. Test in Task 7.
 5. **No config on the item** (Standard Values not set, value empty or invalid JSON) → modal shows "This field isn't set up yet" and a Setup link, never a crash. Test in Task 7.
+6. **Field's item lookup**: empty or invalid config is never matched by value (it would match every empty field); several matches → the editor picks; no match → a message, nothing written. Test in Tasks 3 and 7.
+7. **Authoring API IDs come back compact** (`c49bf206…`, 32 hex, no dashes or braces) → normalized before they're compared or written. Test in Tasks 2, 5 and 6.
 
 ---
 
-### Task 0: Spike — what does the custom field context expose? (THROWAWAY)
+### Task 0: Spike — what does the custom field context expose? (THROWAWAY) — DONE 2026-11-25
+
+Result in `docs/spike-findings.md`. The SDK gives the page, not the item or field that opened the app; the item is found by value match (Task 3). `pages.reloadCanvas` refreshes the multilist. SDK pinned to the spike's versions: `@sitecore-marketplace-sdk/client` ^0.5.1, `@sitecore-marketplace-sdk/xmc` ^0.6.0. The owner chose to continue with approach B.
 
 **Files:**
 - Create (throwaway branch `spike/field-context`): `src/app/custom-field-extension/page.tsx`
@@ -54,7 +58,8 @@
 ### Task 1: Project scaffold and SDK layer
 
 **Files:**
-- Create: `package.json`, `tsconfig.json`, `next.config.ts`, `eslint.config.mjs`, `postcss.config.mjs`, `vitest.config.ts`, `vitest.setup.ts`, `components.json`, `.gitignore`, `LICENSE` (MIT) — copied from Content Transfer, `name` = `sitecore-multilist-item-creator`, drop `jszip`.
+- Create: `package.json`, `tsconfig.json`, `next.config.ts`, `eslint.config.mjs`, `postcss.config.mjs`, `vitest.config.ts`, `vitest.setup.ts`, `components.json`, `.gitignore`, `LICENSE` (MIT) — copied from Content Transfer, `name` = `sitecore-multilist-item-creator`, drop `jszip`. SDK versions from Task 0 (client ^0.5.1, xmc ^0.6.0). `.gitignore` also ignores `/.superpowers/`.
+- Create: `.github/workflows/ci.yml` — on push and pull request: Node 24, `npm ci`, `npm test`, `npm run build`.
 - Create: `src/utils/hooks/useMarketplaceClient.ts` (copy; keep `modules: [XMC]`, timeout 60_000)
 - Create: `src/lib/sdk.ts` — only `Env`, `SdkClient`, `SdkError`, `call`, `graphql`, `toEnvs` from Content Transfer
 - Create: `src/test/fakeClient.ts` — only `fakeClient` and `FakeReply`
@@ -82,7 +87,7 @@
   - `type CreatorConfig = { targetField: string; folder?: string; templates?: string[]; nameFrom?: string; required?: string[] }`
   - `type ConfigResult = { ok: true; config: CreatorConfig } | { ok: false; reason: 'empty' | 'invalid-json' | 'missing-target' | 'bad-guid' ; message: string }`
   - `parseConfig(raw: string | null | undefined): ConfigResult`
-  - `normalizeId(id: string): string` — returns `{UPPERCASE-GUID}`; throws `SdkError` on non-GUID.
+  - `normalizeId(id: string): string` — returns `{UPPERCASE-GUID}`; accepts dashed GUIDs with or without braces and the Authoring API's compact 32-hex form; throws `SdkError` on non-GUID.
 
 `required` lists extra field names the create form asks for (spec: "any fields the config marks as required to create").
 
@@ -97,6 +102,8 @@ expect(parseConfig('{"targetField":"Related Items"}')).toEqual({ ok: true, confi
 expect(parseConfig('{"targetField":"X","folder":"1c0685bf-fbf9-447b-8fc9-6758ecae42cd"}'))
   .toEqual({ ok: true, config: { targetField: 'X', folder: '{1C0685BF-FBF9-447B-8FC9-6758ECAE42CD}' } });
 expect(normalizeId('{1c0685bf-fbf9-447b-8fc9-6758ecae42cd}')).toBe('{1C0685BF-FBF9-447B-8FC9-6758ECAE42CD}');
+expect(normalizeId('1c0685bffbf9447b8fc96758ecae42cd')).toBe('{1C0685BF-FBF9-447B-8FC9-6758ECAE42CD}');
+expect(() => normalizeId('local:/Data/x')).toThrow();
 ```
 
 - [ ] **Step 2:** `npx vitest run src/lib/config.test.ts` → FAIL (module missing).
@@ -106,25 +113,37 @@ expect(normalizeId('{1c0685bf-fbf9-447b-8fc9-6758ecae42cd}')).toBe('{1C0685BF-FB
 
 ---
 
-### Task 3: Field context
+### Task 3: Find the field's item (rewritten after the spike)
+
+The SDK names the page, never the item or field that opened the app. So the app reads the page and every datasource in the page's layout, and keeps the ones holding a field whose value equals `getValue()`.
 
 **Files:**
 - Create: `src/lib/fieldContext.ts`
 - Test: `src/lib/fieldContext.test.ts`
 
 **Interfaces:**
-- Consumes: `docs/spike-findings.md` (exact SDK keys and response shapes), `toEnvs`, `Env`.
+- Consumes: `docs/spike-findings.md` (response shapes and the candidate query), `toEnvs`, `Env`, `graphql`, `SdkError`, `normalizeId`.
 - Produces:
-  - `type FieldContext = { env: Env; itemId: string; language: string; version?: number; rawConfig: string }`
-  - `getFieldContext(client: SdkClient & { getValue(): Promise<string> }): Promise<FieldContext>` — throws `SdkError` with message `"Couldn't tell which item this field is on."` when the item ID is missing.
+  - `type Candidate = { itemId: string; name: string; path: string; templateId: string; version?: number; fields: { name: string; value: string }[] }` (IDs normalized)
+  - `type PageContext = { env: Env; language: string; rawConfig: string; candidates: Candidate[] }`
+  - `type FieldContext = { env: Env; itemId: string; itemName: string; itemPath: string; templateId: string; language: string; version?: number; rawConfig: string }`
+  - `readPage(client: SdkClient & { getValue(): Promise<unknown> }): Promise<PageContext>`
+  - `matchByValue(candidates: Candidate[], raw: string): Candidate[]` — candidates with a field whose value equals `raw` exactly; `[]` when `raw` is blank (blank would match every empty field).
+  - `matchByField(candidates: Candidate[], fieldName: string): Candidate[]` — candidates with a field of that name, case-insensitive. Setup uses it before a config exists.
+  - `toFieldContext(page: PageContext, c: Candidate): FieldContext`
 
-Env choice: the environment whose `contextId` matches the one the spike shows the field runs in; if `application.context` returns exactly one env, use it.
+`readPage`:
+1. `getValue()` → `rawConfig` (anything but a string → `''`).
+2. `application.context` → `toEnvs`. Use the env whose `id` equals `host.state` → `xmCloudTenantInfo.id`; else the only env; else `SdkError("Couldn't tell which environment this page is in.")`.
+3. `pages.context` → `pageInfo.id`, `pageInfo.path`, `pageInfo.language` (else `siteInfo.language`), and the `dataSource` of every rendering in `JSON.parse(pageInfo.presentationDetails).devices[].renderings[]`. No `pageInfo.id` → `SdkError("Couldn't tell which page this is.")`.
+4. One aliased Authoring query (shape in the findings, plus `version`): the page first, then each distinct non-empty `dataSource` in layout order. A GUID (any form) is looked up by `itemId`; `local:/x` by path `<page path>/x`; `/sitecore/…` by path; anything else is skipped. Aliases that come back `null` are dropped.
+5. A plain query (`application.context`, `pages.context`, `host.state`) that resolves with `isError` → `SdkError`. Never log or keep `siteInfo`: it can carry protection-bypass tokens.
 
-- [ ] **Step 1: Write failing tests** using `fakeClient` with handlers shaped exactly like the spike's recorded responses: (a) page field → `itemId`, `language`, `rawConfig` from `getValue`; (b) datasource field → the datasource's item ID, not the page's; (c) item ID missing → rejects with the message above.
+- [ ] **Step 1: Write failing tests** with `fakeClient` (plus a `getValue` stub) and replies shaped like the findings: candidates are the page then the datasources in layout order, de-duplicated, `local:` resolved, compact IDs normalized; null aliases dropped; env picked by host tenant out of two; missing page ID → its message; `matchByValue` with one hit, two hits, and blank `raw` → `[]`; `matchByField` ignores case.
 - [ ] **Step 2:** Run → FAIL.
-- [ ] **Step 3:** Implement `getFieldContext`. IDs through `normalizeId`.
+- [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run → PASS.
-- [ ] **Step 5:** Commit `feat: read field context from the SDK`.
+- [ ] **Step 5:** Commit `feat: find the field's item on the page`.
 
 ---
 
@@ -141,7 +160,7 @@ Env choice: the environment whose `contextId` matches the one the spike shows th
   - `resolveTarget(client: SdkClient, ctx: FieldContext, config: CreatorConfig): Promise<Target>`
 
 Resolution order (spec "fallback"):
-1. `folder` = `config.folder`, else the target field's Source on the item's own template: find the template field item named `config.targetField` under the template's sections; parse its `Source` value as an ID or path; for a `StartSearchLocation={ID}` source, take that ID. Base templates are not searched.
+1. `folder` = `config.folder`, else the target field's Source on the item's own template (`ctx.templateId`): find the template field item named `config.targetField` under the template's sections; parse its `Source` value as an ID or path; for a `StartSearchLocation={ID}` source, take that ID. Base templates are not searched.
 2. `templates` = `config.templates`, else the folder's `__Masters` field (Insert Options), split on `|`.
 3. Look up each template's name in one query.
 
@@ -216,16 +235,18 @@ expect(appendId('B|a', '{A}')).toEqual({ value: 'B|a', added: false });
 - Test: `src/components/creator/CreatorModal.test.tsx`
 
 **Interfaces:**
-- Consumes: `getFieldContext`, `parseConfig`, `resolveTarget`, `createItem`, `validateItemName`, `addToMultilist`.
+- Consumes: `readPage`, `matchByValue`, `toFieldContext`, `parseConfig`, `resolveTarget`, `createItem`, `validateItemName`, `addToMultilist`.
 - Produces: `CreatorModal({ client }: { client: ClientSDK })`; `onOpenSetup` switches to Task 8's view.
 
-States: loading → not-set-up (config `ok:false`) → form (template select, name, one input per `config.required`, prefilled name from `nameFrom` field if typed) → working → done (`"Added <name> to <targetField>. Reload the page to see it in the list."`, plus `client.closeApp()` on Close) → error.
+States: loading → not-set-up (config `ok:false`; the lookup isn't run) → pick (several `matchByValue` hits: one button per item, name and path) → form (template select, name, one input per `config.required`, prefilled name from `nameFrom` field if typed) → working → done (`"Added <name> to <targetField>."`, plus `client.closeApp()` on Close) → error. No hit → error `"Couldn't find this field's item on the page. Components from partial designs aren't supported yet."`
 
-Copy (in `copy.ts`): not set up → `"This field isn't set up yet."` + button `"Open setup"`; partial failure → `"Created <path>, but couldn't add it to <targetField>. Select it there yourself."`
+After a successful append, call `client.mutate('pages.reloadCanvas')` so the multilist shows the new item. If that call fails, add `" Reload the page to see it in the list."` to the done message.
 
-- [ ] **Step 1: Write failing tests** with a fake client: renders not-set-up for empty and invalid config (Review Focus 5); lists resolved templates; Create disabled while name is invalid and shows the Task 6 message; happy path calls create then add, shows the done message; append failure after create shows the partial-failure copy with the path and does not call create again (Review Focus 4); create failure shows the `SdkError` message.
+Copy (in `copy.ts`): not set up → `"This field isn't set up yet."` + button `"Open setup"`; pick → `"This field is on more than one component here. Which one?"`; partial failure → `"Created <path>, but couldn't add it to <targetField>. Select it there yourself."`
+
+- [ ] **Step 1: Write failing tests** with a fake client: renders not-set-up for empty and invalid config (Review Focus 5); no match → the not-found message, nothing written; two matches → pick, and the chosen item is the one written (Review Focus 6); lists resolved templates; Create disabled while name is invalid and shows the Task 6 message; happy path calls create, then add, then `pages.reloadCanvas`, and shows the done message; append failure after create shows the partial-failure copy with the path and does not call create again (Review Focus 4); create failure shows the `SdkError` message.
 - [ ] **Step 2:** Run → FAIL.
-- [ ] **Step 3:** Implement component and wire the page (client from `useMarketplaceClient`, error and loading states like Content Transfer's extension pages). If the spike found a refresh event, call it after success and drop "Reload the page…" from the copy.
+- [ ] **Step 3:** Implement component and wire the page (client from `useMarketplaceClient`, error and loading states like Content Transfer's extension pages).
 - [ ] **Step 4:** Run → PASS; `npm run build` succeeds.
 - [ ] **Step 5:** Commit `feat: creator modal`.
 
@@ -238,8 +259,10 @@ Copy (in `copy.ts`): not set up → `"This field isn't set up yet."` + button `"
 - Test: `src/lib/setup.test.ts`, `src/components/creator/SetupView.test.tsx`
 
 **Interfaces:**
-- Consumes: `CreatorConfig`, `parseConfig`, `resolveTarget`, `FieldContext`.
-- Produces: `buildConfig(form: { targetField: string; folder?: string; templates?: string[]; nameFrom?: string; required?: string[] }): string` (pretty JSON, empty optionals omitted); `SetupView({ client, ctx, initial })`.
+- Consumes: `CreatorConfig`, `parseConfig`, `resolveTarget`, `PageContext`, `matchByField`, `toFieldContext`.
+- Produces: `buildConfig(form: { targetField: string; folder?: string; templates?: string[]; nameFrom?: string; required?: string[] }): string` (pretty JSON, empty optionals omitted); `SetupView({ client, page, initial })`.
+
+Setup can't use the value lookup: the config it builds isn't stored yet. **Check** takes the first candidate with a field named the form's `targetField` (`matchByField`) and says which item it checked; none → `"No item on this page has a field named <targetField>."`
 
 Decision (spec left it to the builder): Setup **produces JSON to copy** and shows where to paste it (`"Paste this into the field's value on the template's Standard Values."`). It does not write Standard Values itself — keeps the app from editing templates.
 
@@ -258,7 +281,7 @@ Setup has **Check** which runs `resolveTarget` with the form's config against th
 **Files:**
 - Create: `README.md`, `public/logo.svg`
 
-- [ ] **Step 1:** README in Content Transfer's style: what it does (one paragraph), install (App Studio registration, extension point, route), set up a field (template field type "Marketplace Type -> Plugin", Source = app ID, Standard Values JSON with the config table), the fallback rules, limitations (refresh, base templates not searched, workflow not touched).
+- [ ] **Step 1:** README in Content Transfer's style: what it does (one paragraph), install (App Studio registration, extension point, route), set up a field (template field type "Marketplace Type -> Plugin", Source = app ID, Standard Values JSON with the config table), the fallback rules, limitations (components from partial designs not found, several same-type components ask the editor to pick, base templates not searched, workflow not touched).
 - [ ] **Step 2:** Manual end-to-end on a test environment, both page and datasource fields: create with full config; create with only `targetField`; already-selected guard; non-default language; user without create rights sees Sitecore's message. Record results in `docs/e2e-2026-11.md`.
 - [ ] **Step 3:** `npm test` and `npm run build` pass.
 - [ ] **Step 4:** Commit `docs: readme and e2e results`.

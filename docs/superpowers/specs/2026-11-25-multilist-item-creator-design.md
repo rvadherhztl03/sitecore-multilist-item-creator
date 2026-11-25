@@ -37,9 +37,9 @@ These come from how the Marketplace custom field extension point works today.
 
 - **The field is a plugin field, not a new field type.** It is added to a data template with type "Marketplace Type -> Plugin" and the app ID in the Source column ([enable a custom field](https://doc.sitecore.com/mp/en/developers/marketplace/enable-a-custom-field-in-the-sitecoreai-page-builder.html)). So per-field settings such as target folder and template cannot go in Source.
 - **The app opens in a modal.** The editor clicks Open app on the field; the app runs in that modal and closes itself ([extension points](https://doc.sitecore.com/mp/en/developers/marketplace/extension-points.html)).
-- **The documented SDK surface is the field's own value.** The docs show getting and setting the custom field's value ([get and set values](https://doc.sitecore.com/mp/en/developers/sdk/0/sitecore-marketplace-sdk/get-and-set-custom-field-values.html)). Whether the app also learns the current item, page, language and field name is not documented. The spike settles this.
+- **The documented SDK surface is the field's own value.** The docs show getting and setting the custom field's value ([get and set values](https://doc.sitecore.com/mp/en/developers/sdk/0/sitecore-marketplace-sdk/get-and-set-custom-field-values.html)). Whether the app also learns the current item, page, language and field name is not documented. The spike settled it: the app learns the page (`pages.context`) but not which item or field opened it ([spike findings](../../spike-findings.md)).
 - **Creating items and writing the multilist need the Authoring API.** The app calls it through the SDK's SitecoreAI APIs, so permissions come from the signed-in user inside SitecoreAI.
-- **The Page builder caches what it shows.** After the app writes the multilist through the API, the native field may not show the new selection until refresh.
+- **The Page builder caches what it shows.** After the app writes the multilist through the API, the native field shows the new selection once the app calls `pages.reloadCanvas` (spike).
 - **Local development works in place.** The app can be registered against localhost and debugged inside the Page builder with live data ([Marketplace starter](https://github.com/Sitecore/marketplace-starter)).
 
 ## Approaches
@@ -54,9 +54,9 @@ We chose **B, the companion field**, because adoption by other teams matters mor
 | Existing content | Needs migration | Untouched |
 | If the app is down | Field cannot be edited | Editors lose only the create shortcut |
 | Editor experience | One field, seamless | Two fields; new selection may need a refresh |
-| Main dependency | Only the documented get/set value | SDK must expose the current item (spike) |
+| Main dependency | Only the documented get/set value | Finding the field's item on the page (spike: the SDK gives only the page) |
 
-A stays the fallback if the spike shows B cannot know which item it is on.
+A stays the fallback if the item lookup below proves unreliable.
 
 ## Design
 
@@ -85,17 +85,18 @@ If `folder` or `templates` is missing, the app falls back to the target multilis
 ### Editor flow
 
 1. Editor clicks Open app on the companion field, in Page content or a component's Content tab.
-2. The app reads its config and the current item, language and version from the SDK.
+2. The app reads its config (`getValue`) and the page, language and layout (`pages.context`). It finds the field's item by reading the page and every datasource in the page's layout, and keeping those with a field whose value equals the config. If several match (for example two components of the same type), the editor picks one by name. If none match, it says so.
 3. It shows the allowed templates, a name box and any fields the config marks as required to create (for example Title).
 4. On Create, it creates the item in the target folder, in the current language, through the Authoring API.
 5. It re-reads the target multilist's current value, appends the new ID if not already present, and saves the field. It never replaces the existing selection.
-6. It closes and tells the editor the item was added. If the SDK offers a refresh event, it triggers one; otherwise the message says to reload to see it in the list.
+6. It calls `pages.reloadCanvas` so the multilist shows the new item, and tells the editor the item was added. If the reload call fails, the message says to reload the page.
 
 ### Errors and edge cases
 
 - **No create rights** on the folder: show who can fix it; create nothing.
 - **Item creation succeeds but the field update fails**: say so and show the new item's path so it can be selected by hand.
 - **Config invalid or target field missing**: show the problem in the modal, with a link to Setup.
+- **Field's item not found on the page**: for example a component from an SXA partial design, whose datasource isn't in the page's layout. Say so; create nothing.
 - **Workflow**: the new item enters its template's default workflow like any other new item. The app does not approve or publish it.
 - **Shared vs versioned multilist**: write the field in the language and version the editor is on; if the field is shared, a single write covers all.
 
