@@ -47,7 +47,7 @@ describe('validateItemName', () => {
 });
 
 describe('createItem', () => {
-  it('sends name, template, parent, language and fields, and returns the normalized ID and path', async () => {
+  it('sends name, template, parent and language as variables, and returns the normalized ID and path', async () => {
     const { client, calls } = fakeClient({ 'xmc.authoring.graphql': () => CREATED });
     const result = await createItem(client, CTX, INPUT);
     expect(result).toEqual({ id: '{1C0685BF-FBF9-447B-8FC9-6758ECAE42CD}', path: '/sitecore/content/Home/Articles/New article' });
@@ -59,14 +59,39 @@ describe('createItem', () => {
       templateId: INPUT.templateId,
       parent: INPUT.folderId,
       language: 'en',
-      fields: [{ name: 'Title', value: 'New article' }, { name: 'Author', value: 'Ana' }],
     });
     expect(calls[0].params.query.sitecoreContextId).toBe('p1');
   });
-  it('sends an empty field list when there are no fields', async () => {
+  it('writes the fields into the document as literals, not as a variable', async () => {
+    const { client, calls } = fakeClient({ 'xmc.authoring.graphql': () => CREATED });
+    await createItem(client, CTX, INPUT);
+    const { query, variables } = calls[0].params.body;
+    expect(query).toContain('fields: [{ name: "Title", value: "New article" }, { name: "Author", value: "Ana" }]');
+    expect(query).not.toContain('$fields');
+    expect(query).not.toContain('FieldValueInput');
+    expect(variables).not.toHaveProperty('fields');
+  });
+  it('escapes quotes, backslashes and newlines in a field value as GraphQL string syntax', async () => {
+    const { client, calls } = fakeClient({ 'xmc.authoring.graphql': () => CREATED });
+    await createItem(client, CTX, { ...INPUT, fields: { Text: 'He said "hi" in C:\\dir\nnext line' } });
+    expect(calls[0].params.body.query).toContain(String.raw`fields: [{ name: "Text", value: "He said \"hi\" in C:\\dir\nnext line" }]`);
+  });
+  it('leaves fields out of the document when there are none', async () => {
     const { client, calls } = fakeClient({ 'xmc.authoring.graphql': () => CREATED });
     await createItem(client, CTX, { ...INPUT, fields: {} });
-    expect(calls[0].params.body.variables.fields).toEqual([]);
+    expect(calls[0].params.body.query).not.toContain('fields');
+  });
+  it.each([
+    ['createItem is null', { createItem: null }],
+    ['item is null', { createItem: { item: null } }],
+    ['item has no itemId', { createItem: { item: { name: 'New article', path: '/x' } } }],
+    ['the reply has no data', null],
+  ])("says Sitecore didn't confirm the item when %s", async (_why, data) => {
+    const { client, calls } = fakeClient({ 'xmc.authoring.graphql': () => ({ data: { data } }) });
+    const err = await createItem(client, CTX, INPUT).catch((e) => e);
+    expect(err).toBeInstanceOf(SdkError);
+    expect(err.message).toBe("Sitecore didn't confirm the new item. Check the folder before trying again.");
+    expect(calls).toHaveLength(1);
   });
   it("surfaces Sitecore's error message as an SdkError, without retrying", async () => {
     const { client, calls } = fakeClient({ 'xmc.authoring.graphql': () => ({ data: { errors: [{ message: 'Item already exists: New article' }] } }) });

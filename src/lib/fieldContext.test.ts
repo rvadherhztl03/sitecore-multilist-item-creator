@@ -125,6 +125,18 @@ describe('readPage', () => {
     expect(page.candidates.map((c) => c.name)).toEqual(['Home', 'Teaser']);
   });
 
+  it.each([['null', null], ['missing', undefined], ['without an ID', {}]])('drops an alias whose template is %s, and keeps the others', async (_why, template) => {
+    const { client } = setup({
+      page: pagesContext(layout(DS1, DS2)),
+      authoring: () => ({
+        i0: item(PAGE, 'Home', '/sitecore/content/Site/Home'),
+        i1: { ...item(DS1, 'Hero', '/x/Hero'), template },
+        i2: item(DS2, 'Teaser', '/x/Teaser'),
+      }),
+    });
+    expect((await readPage(client)).candidates.map((c) => c.name)).toEqual(['Home', 'Teaser']);
+  });
+
   it('drops a datasource that resolves to an item already listed', async () => {
     const { client } = setup({
       page: pagesContext(layout('local:/', PAGE)),
@@ -151,6 +163,22 @@ describe('readPage', () => {
     const page = await readPage(client);
     expect(page.env).toMatchObject({ id: TENANT_B, contextId: 'ctxB' });
     expect(authoringCalls(calls)[0].params.query.sitecoreContextId).toBe('ctxB');
+  });
+
+  it.each([
+    ['the host gives the tenant id in upper case', TENANT_B.toUpperCase(), APP_TWO],
+    [
+      'the app gives the tenant id in upper case',
+      TENANT_B,
+      { resourceAccess: [resource(TENANT_A, 'Org / DEV', 'ctxA', 'liveA'), resource(TENANT_B.toUpperCase(), 'Org / QA', 'ctxB', 'liveB')] },
+    ],
+  ])('matches the env by tenant id regardless of case when %s', async (_why, hostId, app) => {
+    const { client } = setup({
+      app,
+      host: () => ({ xmCloudTenantInfo: { id: hostId } }),
+      authoring: () => ({ i0: item(PAGE, 'Home', '/sitecore/content/Site/Home') }),
+    });
+    expect((await readPage(client)).env).toMatchObject({ contextId: 'ctxB' });
   });
 
   it('uses the only env without asking the host', async () => {
@@ -181,6 +209,14 @@ describe('readPage', () => {
     expect(authoringCalls(calls)).toEqual([]);
   });
 
+  it.each(['not-a-guid', 42, {}])('fails with the page message when the page ID (%j) is not an item ID', async (id) => {
+    const { client, calls } = setup({ page: pagesContext(layout(), { id }) });
+    const err = await readPage(client).catch((e) => e);
+    expect(err).toBeInstanceOf(SdkError);
+    expect(err.message).toBe("Couldn't tell which page this is.");
+    expect(authoringCalls(calls)).toEqual([]);
+  });
+
   it('falls back to the site language when the page has none', async () => {
     const { client } = setup({
       page: { ...pagesContext(layout(), { language: undefined }), siteInfo: { language: 'de' } },
@@ -196,6 +232,14 @@ describe('readPage', () => {
     const s = setup({ authoring: () => ({ i0: item(PAGE, 'Home', '/x') }) });
     const page = await readPage({ ...s.client, getValue: async () => undefined });
     expect(page.rawConfig).toBe('');
+  });
+
+  it("turns a getValue that rejects into an SdkError that says the field's value couldn't be read", async () => {
+    const s = setup();
+    const err = await readPage({ ...s.client, getValue: async () => { throw new Error('bridge closed'); } }).catch((e) => e);
+    expect(err).toBeInstanceOf(SdkError);
+    expect(err.message).toBe("Couldn't read this field's value from Sitecore.");
+    expect(s.calls).toEqual([]);
   });
 
   it('turns a plain query that resolves with isError into an SdkError', async () => {

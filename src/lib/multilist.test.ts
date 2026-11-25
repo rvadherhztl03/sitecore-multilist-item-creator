@@ -37,6 +37,17 @@ describe('appendId', () => {
     expect(appendId(value, A_COMPACT)).toEqual({ value, added: false });
   });
 
+  it('drops trailing empty segments before appending, so there is no ||', () => {
+    expect(appendId(`${B}|`, A)).toEqual({ value: `${B}|${A}`, added: true });
+    expect(appendId(`${B}|${C}||`, A)).toEqual({ value: `${B}|${C}|${A}`, added: true });
+    expect(appendId('|', A)).toEqual({ value: A, added: true });
+    expect(appendId('||', A_COMPACT)).toEqual({ value: A, added: true });
+  });
+
+  it('leaves a value with the ID already in it alone, trailing | included', () => {
+    expect(appendId(`${A}|`, A)).toEqual({ value: `${A}|`, added: false });
+  });
+
   it('does not match or throw on an entry that is not an item ID', () => {
     expect(appendId(`nope|${B}`, A)).toEqual({ value: `nope|${B}|${A}`, added: true });
     expect(appendId(`nope|${A}`, A)).toEqual({ value: `nope|${A}`, added: false });
@@ -59,13 +70,13 @@ describe('addToMultilist', () => {
     rawConfig: '{"targetField":"Items"}',
   };
 
-  /** Replies to the read with `fields` and to the update with an item; `items` lists the replies' bodies. */
-  const setup = (fields: { name: string; value: string | null }[]) =>
+  /** Replies to the read with `fields` and `version`, and to the update with an item. */
+  const setup = (fields: { name: string; value: string | null }[], version: number | undefined = 3) =>
     fakeClient({
       'xmc.authoring.graphql': (params) =>
         params.body.query.includes('mutation')
-          ? { data: { data: { updateItem: { item: { itemId: B_COMPACT, name: 'Hero', path: '/x', version: 3 } } } } }
-          : { data: { data: { item: { fields: { nodes: fields } } } } },
+          ? { data: { data: { updateItem: { item: { itemId: B_COMPACT, name: 'Hero', path: '/x', version } } } } }
+          : { data: { data: { item: { version, fields: { nodes: fields } } } } },
     });
 
   const bodies = (calls: { params: any }[]) => calls.map((c) => c.params.body); // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -78,7 +89,7 @@ describe('addToMultilist', () => {
     expect(calls.every((c) => c.key === 'xmc.authoring.graphql' && c.params.query.sitecoreContextId === 'ctx-1')).toBe(true);
     expect(read.query).not.toContain('mutation');
     expect(read.query).toContain('excludeStandardFields: true');
-    expect(read.variables).toEqual({ itemId: B, language: 'en', version: 3 });
+    expect(read.variables).toEqual({ itemId: B, language: 'en' });
     expect(write.query).toContain('mutation');
     expect(write.variables).toEqual({ itemId: B, language: 'en', version: 3, field: 'Items', value: `${B}|${A}` });
   });
@@ -104,21 +115,30 @@ describe('addToMultilist', () => {
     expect(bodies(calls)[1].variables).toMatchObject({ field: 'Related Items', value: `${B}|${A}` });
   });
 
-  it('uses the version it was given, and none when there is none', async () => {
-    const { client, calls } = setup([{ name: 'Items', value: '' }]);
-    await addToMultilist(client, { ...ctx, language: 'da', version: undefined }, 'Items', A);
+  it('reads without a version, selects it, and writes with the version the read returned', async () => {
+    const { client, calls } = setup([{ name: 'Items', value: '' }], 7);
+    await addToMultilist(client, { ...ctx, language: 'da', version: 3 }, 'Items', A);
     const [read, write] = bodies(calls);
+    expect(read.query).not.toContain('$version');
+    expect(read.query).not.toMatch(/where:\s*\{[^}]*version/);
+    expect(read.query).toMatch(/item\(where: \{[^}]*\}\) \{\s*version\b/);
     expect(read.variables).toEqual({ itemId: B, language: 'da' });
-    expect(write.variables).toEqual({ itemId: B, language: 'da', field: 'Items', value: A });
+    expect(write.variables).toEqual({ itemId: B, language: 'da', version: 7, field: 'Items', value: A });
+  });
+
+  it('ignores ctx.version: the write uses the read version even when the context has none', async () => {
+    const { client, calls } = setup([{ name: 'Items', value: '' }], 2);
+    await addToMultilist(client, { ...ctx, version: undefined }, 'Items', A);
+    const [read, write] = bodies(calls);
     expect(read.variables).not.toHaveProperty('version');
-    expect(write.variables).not.toHaveProperty('version');
+    expect(write.variables).toMatchObject({ version: 2 });
   });
 
   it('reads again on every call, so it appends to what is stored now', async () => {
     let stored = B;
     const { client, calls } = fakeClient({
       'xmc.authoring.graphql': (params) => {
-        if (!params.body.query.includes('mutation')) return { data: { data: { item: { fields: { nodes: [{ name: 'Items', value: stored }] } } } } };
+        if (!params.body.query.includes('mutation')) return { data: { data: { item: { version: 3, fields: { nodes: [{ name: 'Items', value: stored }] } } } } };
         stored = params.body.variables.value;
         return { data: { data: { updateItem: { item: { itemId: B_COMPACT } } } } };
       },
@@ -145,7 +165,7 @@ describe('addToMultilist', () => {
       'xmc.authoring.graphql': (params) =>
         params.body.query.includes('mutation')
           ? { data: { errors: [{ message: 'Access denied' }] } }
-          : { data: { data: { item: { fields: { nodes: [{ name: 'Items', value: '' }] } } } } },
+          : { data: { data: { item: { version: 3, fields: { nodes: [{ name: 'Items', value: '' }] } } } } },
     });
     await expect(addToMultilist(client, ctx, 'Items', A)).rejects.toThrow('Access denied');
   });

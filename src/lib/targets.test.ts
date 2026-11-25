@@ -78,6 +78,8 @@ describe('resolveTarget', () => {
     expect(ops()).toEqual(['ReadFolder', 'TemplateNames']);
     expect(calls.every((c) => c.key === 'xmc.authoring.graphql' && c.params.query.sitecoreContextId === 'p1')).toBe(true);
     expect(calls[0].params.body.variables).toEqual({ itemId: braced(FOLDER), language: 'en' });
+    // __Masters is a standard field: the folder read has to ask for them.
+    expect(calls[0].params.body.query).toContain('excludeStandardFields: false');
   });
 
   it('reads the Source of the field on the template when there is no configured folder (three round trips)', async () => {
@@ -114,6 +116,22 @@ describe('resolveTarget', () => {
   it('resolves a Source path to the folder ID, reading the folder by path', async () => {
     const path = '/sitecore/content/Shared/Items';
     const { client, calls } = world({ source: path, folders: { [path]: FOLDERS[braced(FOLDER)] }, names: NAMES });
+
+    const target = await resolveTarget(client, CTX, CONFIG);
+
+    expect(target).toMatchObject({ folderId: braced(FOLDER), folderPath: path });
+    expect(calls[1].params.body.variables).toEqual({ path, language: 'en' });
+  });
+
+  it.each([
+    ['one trailing slash', '/sitecore/content/Shared/Items/'],
+    ['several trailing slashes', '/sitecore/content/Shared/Items//'],
+    ['a trailing slash and spaces', '  /sitecore/content/Shared/Items/ '],
+    ['a trailing slash in StartSearchLocation', 'StartSearchLocation=/sitecore/content/Shared/Items/&IncludeTemplatesForSelection=Article'],
+    ['a trailing slash in DataSource', 'DataSource=/sitecore/content/Shared/Items/'],
+  ])('reads the folder by its path without the trailing slash: %s', async (_label, source) => {
+    const path = '/sitecore/content/Shared/Items';
+    const { client, calls } = world({ source, folders: { [path]: FOLDERS[braced(FOLDER)] }, names: NAMES });
 
     const target = await resolveTarget(client, CTX, CONFIG);
 

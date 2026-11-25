@@ -2,8 +2,9 @@ import { normalizeId } from '@/lib/config';
 import type { FieldContext } from '@/lib/fieldContext';
 import { graphql, SdkError, type SdkClient } from '@/lib/sdk';
 
-const READ = `query ReadField($itemId: ID!, $language: String!, $version: Int) {
-  item(where: { database: "master", itemId: $itemId, language: $language, version: $version }) {
+const READ = `query ReadField($itemId: ID!, $language: String!) {
+  item(where: { database: "master", itemId: $itemId, language: $language }) {
+    version
     fields(ownFields: false, excludeStandardFields: true) { nodes { name value } }
   }
 }`;
@@ -23,22 +24,24 @@ const same = (entry: string, id: string) => {
   }
 };
 
-/** Adds `id` (written as `{UPPER-DASHED}`) to a multilist value; existing entries stay as stored. `added` is false when it was already there. */
+/** Adds `id` (written as `{UPPER-DASHED}`) to a multilist value; existing entries stay as stored, minus trailing empty ones (`{B}|` + A is `{B}|{A}`). `added` is false when it was already there. */
 export function appendId(value: string | null | undefined, id: string): { value: string; added: boolean } {
   const wanted = normalizeId(id);
   if (!value?.trim()) return { value: wanted, added: true };
-  if (value.split('|').some((entry) => same(entry, wanted))) return { value, added: false };
-  return { value: `${value}|${wanted}`, added: true };
+  const entries = value.split('|');
+  if (entries.some((entry) => same(entry, wanted))) return { value, added: false };
+  while (entries.length && !entries[entries.length - 1].trim()) entries.pop();
+  return { value: [...entries, wanted].join('|'), added: true };
 }
 
-/** Re-reads the field, appends `id` and writes it back; writes nothing when the ID is already there. */
+/** Re-reads the field, appends `id` and writes it back at the version the read returned; writes nothing when the ID is already there. */
 export async function addToMultilist(client: SdkClient, ctx: FieldContext, fieldName: string, id: string): Promise<{ added: boolean }> {
-  const where = { itemId: ctx.itemId, language: ctx.language, ...(ctx.version !== undefined && { version: ctx.version }) };
+  const where = { itemId: ctx.itemId, language: ctx.language };
   const data = await graphql(client, ctx.env, READ, where);
   const wanted = fieldName.toLowerCase();
   const field = (data?.item?.fields?.nodes ?? []).find((f: { name: string }) => f.name.toLowerCase() === wanted);
   if (!field) throw new SdkError(`Field "${fieldName}" isn't on this item.`);
   const { value, added } = appendId(field.value, id);
-  if (added) await graphql(client, ctx.env, UPDATE, { ...where, field: field.name, value });
+  if (added) await graphql(client, ctx.env, UPDATE, { ...where, version: data.item.version, field: field.name, value });
   return { added };
 }

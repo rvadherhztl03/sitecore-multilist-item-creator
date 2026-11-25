@@ -16,7 +16,7 @@ function sourceFolder(source: string | undefined): string | undefined {
     try {
       return normalizeId(v);
     } catch {
-      return /^\/sitecore\//i.test(v.trim()) ? v.trim() : undefined;
+      return /^\/sitecore\//i.test(v.trim()) ? v.trim().replace(/\/+$/, '') : undefined;
     }
   };
   const s = source?.trim() ?? '';
